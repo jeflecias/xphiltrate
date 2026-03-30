@@ -1,60 +1,54 @@
-from fastapi import FastAPI, Response, Request, HTTPException
+from fastapi import FastAPI, Request, Response, HTTPException
 import httpx
 from urllib.parse import urljoin
 
-#setup fastapi, httpx
 app = FastAPI()
-client = httpx.AsyncClient()
+
+client = httpx.AsyncClient(follow_redirects=False)
 TARGET_BASE = "https://example.com"
 
-# match any path and capture
-@app.api_route("/{path:path}", methods=["GET","POST","PUT","DELETE"])
-async def fetch(request: Request, path: str):
-	# build target url
-	url = urljoin(TARGET_BASE.rstrip("/") + "/", path)
-	
-	if not url:
-		raise HTTPException(status_code = 400, detail="?")
-		
-	# append query to orig url
-	if request.query_params:
-		url += "?" + str(request.query_params)
-		
-	# request body (in raw)
-	body = await request.body()
-		
-	# incoming headers from client
-	headers = {
-		k: v for k, v in request.headers.items()
-		if k.lower() not in ["host", "content-length"]
+
+HOP_BY_HOP_HEADERS = {
+    "connection", "keep-alive", "proxy-authenticate", 
+    "proxy-authorization", "te", "trailers", 
+    "transfer-encoding", "upgrade", "host", "content-length"
+}
+
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
+async def proxy(request: Request, path: str):
+
+    url = urljoin(TARGET_BASE.rstrip("/") + "/", path)
+    req_headers = {
+		k: v
+		for k, v in request.headers.items()
+		if k.lower() not in HOP_BY_HOP_HEADERS
 	}
-	
-	# separate, debug
-	headers["X-Debug"] = "true"
-	headers["User-Agent"] = "Mozilla/5.0"
-	
-	# manually set host to avoid rejection (ex. https://example.com -> example.com
-	headers["Host"] = TARGET_BASE.split("//")[1].split("/")[0]
-	
-	# actual proxy action
-	# recreate original request -> send to target server (proxy acts as client)
-	resp = await client.request(
-		method=request.method,
-		url=url, 
-		headers=headers,
-		content=body,
-		params=request.query_params
-	)
-	
-	# clean response headers
-	resp_headers = {
-		k:v for k, v in resp.headers.items()
-		if k.lower() not in ["content-length", "transfer-encoding", "content-encoding"]
-	}
-	
-	# send back to client
-	return Response(
-		content=resp.content,
-		status_code=resp.status_code,
-		headers=resp_headers
-	)
+            
+    body = await request.body()
+    
+    try:
+        resp = await client.request(
+            method=request.method,
+            url=url,
+            headers=req_headers,
+            content=body,
+            params=request.query_params
+        )
+        
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"Bad Gateway: {str(exc)}")
+        
+
+    response = Response(
+        content=resp.content,
+        status_code=resp.status_code
+    )
+    
+    DROP_RESP_HEADERS = HOP_BY_HOP_HEADERS.union({"content-encoding"})
+    
+    for k, v in resp.headers.multi_items():
+        if k.lower() not in DROP_RESP_HEADERS:
+            
+            response.headers.append(k, v)
+            
+    return response
