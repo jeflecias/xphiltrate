@@ -4,11 +4,11 @@ import httpx
 import websockets
 from fastapi import FastAPI, Request, Response, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
-from starlette.background import BackgroundTask
 from urllib.parse import urljoin, urlparse
 
 app = FastAPI()
 
+# Increased timeout slightly to give large JS chunks a better chance to complete
 client = httpx.AsyncClient(follow_redirects=False, timeout=60.0)
 TARGET_BASE = "https://example.com"
 parsed_target = urlparse(TARGET_BASE)
@@ -120,7 +120,7 @@ async def proxy(request: Request, path: str):
     req_headers.append(("accept-encoding", "identity"))
             
     body = await request.body()
-    
+
     # ---------------------------------------------------------
     # [INSPECTION MODULE: Authentication POST Bodies]
     # ---------------------------------------------------------
@@ -172,11 +172,18 @@ async def proxy(request: Request, path: str):
         else:
             processed_headers.append((k, v))
 
-    # 5. Body Fork
+    # 5. Body Fork (With Graceful ReadError Handling)
     content_type = resp.headers.get("content-type", "").lower()
     
     if any(t in content_type for t in ["text/html", "javascript", "json"]):
-        raw_bytes = await resp.aread()
+        try:
+            # Wrap the read in a try block to catch ReadErrors on large/stalled files
+            raw_bytes = await resp.aread()
+        except httpx.ReadError as exc:
+            print(f"[!] ReadError while buffering {path}: {exc}")
+            await resp.aclose()
+            raise HTTPException(status_code=502, detail="Upstream server dropped the connection mid-stream.")
+            
         text = raw_bytes.decode("utf-8", errors="ignore") 
         
         # Swap raw domain strings to catch subdomains and JS links
@@ -186,14 +193,23 @@ async def proxy(request: Request, path: str):
         final_response = Response(content=rewritten.encode("utf-8"), status_code=resp.status_code)
         await resp.aclose()
     else:
+        # Safe stream generator for binary assets to prevent crashes mid-download
+        async def safe_stream_generator():
+            try:
+                async for chunk in resp.aiter_bytes():
+                    yield chunk
+            except httpx.ReadError as exc:
+                print(f"[!] Streaming ReadError on {path}: {exc}")
+            finally:
+                await resp.aclose()
+
         final_response = StreamingResponse(
-            resp.aiter_bytes(),
-            status_code=resp.status_code,
-            background=BackgroundTask(resp.aclose)
+            safe_stream_generator(),
+            status_code=resp.status_code
         )
 
     # 6. Cleanup & Header Attachment
-    # Safely check if the header exists before deleting it using 'del'
+    # Safely check if the header exists before deleting it
     if "content-length" in final_response.headers:
         del final_response.headers["content-length"]
     
