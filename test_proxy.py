@@ -13,7 +13,7 @@ app = FastAPI()
 client = httpx.AsyncClient(follow_redirects=False, timeout=60.0)
 
 
-TARGET_BASE = "https://www.veravegas.com/"
+TARGET_BASE = "https://www.example.com/"
 parsed_target = urlparse(TARGET_BASE)
 TARGET_DOMAIN = parsed_target.netloc
 
