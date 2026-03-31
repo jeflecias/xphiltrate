@@ -12,11 +12,17 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request, Response, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from urllib.parse import urljoin, urlparse
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+proxy_setting = os.getenv("PROXY_URL")
+
 
 # =========================================================
 # [CONFIGURATION & CONSTANTS]
 # =========================================================
-TARGET_BASE = "https://zzzzzzzzzzzz-unrecessively-zzzzzzzzz.ngrok-free.dev/"
+TARGET_BASE = ""
 parsed_target = urlparse(TARGET_BASE)
 TARGET_DOMAIN = parsed_target.netloc
 
@@ -162,7 +168,11 @@ async def lifespan(app: FastAPI):
 # [APP INIT]
 # =========================================================
 app = FastAPI(lifespan=lifespan)
-client = httpx.AsyncClient(follow_redirects=False, timeout=60.0)
+client = httpx.AsyncClient(
+    proxy=proxy_setting, 
+    follow_redirects=False, 
+    timeout=60.0
+)
 
 # =========================================================
 # CLIENT-SIDE FORM OBSERVATION SCRIPT
