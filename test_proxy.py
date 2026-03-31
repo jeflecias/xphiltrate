@@ -7,6 +7,7 @@ import httpx
 import websockets
 from typing import Dict
 from contextlib import asynccontextmanager
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request, Response, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, JSONResponse
 from urllib.parse import urljoin, urlparse
@@ -18,7 +19,6 @@ TARGET_BASE = "https://the-internet.herokuapp.com/"
 parsed_target = urlparse(TARGET_BASE)
 TARGET_DOMAIN = parsed_target.netloc
 
-# Added "cookie" to prevent raw browser cookies from leaking to the target
 HOP_BY_HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate",
     "proxy-authorization", "te", "trailers",
@@ -31,7 +31,20 @@ COOKIE_DOMAIN_RE = re.compile(r"(?i);\s*Domain=[^;]+")
 AUTH_KEYWORDS = ["login", "auth", "signin", "token", "password"]
 
 SESSION_FILE = "proxy_sessions.json"
-SESSION_TIMEOUT = 1800  # 30 minutes in seconds
+SESSION_TIMEOUT = 1800
+
+# =========================================================
+# [UTILITIES]
+# =========================================================
+def rewrite_url(url: str, target_domain: str, proxy_domain: str) -> str:
+    """Safely replace target domain with proxy domain in URLs."""
+    if not url:
+        return url
+    if target_domain in url:
+        rewritten = url.replace(target_domain, proxy_domain)
+        rewritten = rewritten.replace(f"https://{proxy_domain}", f"http://{proxy_domain}")
+        return rewritten
+    return url
 
 # =========================================================
 # [SESSION MANAGER MODULE]
@@ -193,14 +206,12 @@ FORM_OBSERVER_SCRIPT = """
 async def websocket_proxy(websocket: WebSocket, path: str):
     await websocket.accept()
     
-    # --- SESSION MANAGEMENT: WEBSOCKET ---
     client_session_id = websocket.cookies.get("proxy_session_id")
     session_id = await session_manager.get_or_create_session(client_session_id)
     session_cookies = await session_manager.get_cookies(session_id)
     
     cookie_str = "; ".join([f"{k}={v}" for k, v in session_cookies.items()])
     ws_headers = {"Cookie": cookie_str} if cookie_str else {}
-    # -------------------------------------
 
     ws_base = TARGET_BASE.replace("https://", "wss://").replace("http://", "ws://")
     target_ws_url = urljoin(ws_base.rstrip("/") + "/", path)
@@ -266,16 +277,13 @@ async def proxy(request: Request, path: str):
     proxy_base = str(request.base_url).rstrip("/")
     proxy_domain = urlparse(proxy_base).netloc
 
-    # --- SESSION MANAGEMENT: INBOUND ---
     client_session_id = request.cookies.get("proxy_session_id")
     session_id = await session_manager.get_or_create_session(client_session_id)
     session_cookies = await session_manager.get_cookies(session_id)
 
-    # Merge browser cookies (excluding our tracker) with server-side jar
     browser_cookies = dict(request.cookies)
     browser_cookies.pop("proxy_session_id", None)
     merged_cookies = {**session_cookies, **browser_cookies}
-    # -----------------------------------
 
     req_headers = []
     for k, v in request.headers.items():
@@ -307,16 +315,14 @@ async def proxy(request: Request, path: str):
             url=target_url,
             headers=req_headers,
             content=body,
-            cookies=merged_cookies # Inject isolated session cookies
+            cookies=merged_cookies
         )
         resp = await client.send(proxy_req, stream=True)
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"Proxy Link Error: {str(exc)}")
 
-    # --- SESSION MANAGEMENT: OUTBOUND ---
     if resp.cookies:
         await session_manager.update_cookies(session_id, dict(resp.cookies))
-    # ------------------------------------
 
     processed_headers = []
     for k, v in resp.headers.multi_items():
@@ -346,14 +352,30 @@ async def proxy(request: Request, path: str):
             raise HTTPException(status_code=502, detail="Upstream dropped connection.")
 
         text = raw_bytes.decode("utf-8", errors="ignore")
-        rewritten = text.replace(TARGET_DOMAIN, proxy_domain)
-        rewritten = rewritten.replace("https://" + proxy_domain, "http://" + proxy_domain)
 
         if "text/html" in content_type:
-            if "</body>" in rewritten.lower():
-                rewritten = re.sub(r'(?i)</body>', FORM_OBSERVER_SCRIPT + '</body>', rewritten, count=1)
+            soup = BeautifulSoup(text, "html.parser")
+
+            for tag in soup.find_all(['a', 'link', 'base'], href=True):
+                tag['href'] = rewrite_url(tag['href'], TARGET_DOMAIN, proxy_domain)
+            
+            for tag in soup.find_all(['script', 'img', 'iframe', 'source', 'audio', 'video'], src=True):
+                tag['src'] = rewrite_url(tag['src'], TARGET_DOMAIN, proxy_domain)
+            
+            for tag in soup.find_all('form', action=True):
+                tag['action'] = rewrite_url(tag['action'], TARGET_DOMAIN, proxy_domain)
+
+            observer_soup = BeautifulSoup(FORM_OBSERVER_SCRIPT, "html.parser")
+            body_tag = soup.find('body')
+            if body_tag:
+                body_tag.append(observer_soup)
             else:
-                rewritten += FORM_OBSERVER_SCRIPT
+                soup.append(observer_soup)
+
+            rewritten = str(soup)
+        else:
+            rewritten = text.replace(TARGET_DOMAIN, proxy_domain)
+            rewritten = rewritten.replace("https://" + proxy_domain, "http://" + proxy_domain)
 
         final_response = Response(
             content=rewritten.encode("utf-8"),
@@ -377,7 +399,6 @@ async def proxy(request: Request, path: str):
     if "content-length" in final_response.headers:
         del final_response.headers["content-length"]
 
-    # --- SESSION MANAGEMENT: BROWSER ATTACH ---
     if client_session_id != session_id:
         final_response.set_cookie(
             key="proxy_session_id",
@@ -386,7 +407,6 @@ async def proxy(request: Request, path: str):
             samesite="Lax",
             max_age=SESSION_TIMEOUT
         )
-    # ------------------------------------------
 
     for k, v in processed_headers:
         if k.lower() in ("content-length", "content-type"):
