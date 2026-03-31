@@ -1,0 +1,2 @@
+python 3.12
+pip install fastapi uvicorn httpx[http2] beautifulsoup4
