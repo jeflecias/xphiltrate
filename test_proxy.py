@@ -16,7 +16,7 @@ from urllib.parse import urljoin, urlparse
 # =========================================================
 # [CONFIGURATION & CONSTANTS]
 # =========================================================
-TARGET_BASE = "https://betty-nonprofit-karren.ngrok-free.dev/"
+TARGET_BASE = "https://zzzzzzzzzzzz-unrecessively-zzzzzzzzz.ngrok-free.dev/"
 parsed_target = urlparse(TARGET_BASE)
 TARGET_DOMAIN = parsed_target.netloc
 
@@ -162,18 +162,7 @@ async def lifespan(app: FastAPI):
 # [APP INIT]
 # =========================================================
 app = FastAPI(lifespan=lifespan)
-
-
-# experimental, for tor testing
-transport = httpx.AsyncHTTPTransport(
-    proxy="socks5://127.0.0.1:9050"
-)
-
-client = httpx.AsyncClient(
-    transport=transport,
-    follow_redirects=False,
-    timeout=60.0
-)
+client = httpx.AsyncClient(follow_redirects=False, timeout=60.0)
 
 # =========================================================
 # CLIENT-SIDE FORM OBSERVATION SCRIPT
