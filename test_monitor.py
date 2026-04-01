@@ -41,7 +41,7 @@ def verify_api_key(x_api_key: str = Header(None)):
 # =========================
 @app.get("/")
 async def get_dashboard():
-        HTML_CONTENT = """ 
+    HTML_CONTENT = """ 
     <!DOCTYPE html>
     <html>
     <head>
@@ -63,8 +63,11 @@ async def get_dashboard():
             <div id="logs"></div>
         </div>
         <script>
-            const ws = new WebSocket(`ws://${window.location.host}/ws`);
+            const protocol = location.protocol === "https:" ? "wss://" : "ws://";
+            const ws = new WebSocket(`${protocol}${window.location.host}/ws`);
+
             const logsContainer = document.getElementById('logs');
+
 
             ws.onmessage = (event) => {
                 const item = JSON.parse(event.data);
@@ -85,6 +88,7 @@ async def get_dashboard():
     </body>
     </html>
     """
+    return HTMLResponse(content=HTML_CONTENT)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

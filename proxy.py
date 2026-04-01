@@ -394,15 +394,14 @@ async def send_to_monitoring(event: dict):
     }
 
     try:
-        async with httpx.AsyncClient(timeout=1.0) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             await client.post(
                 f"{MONITORING_URL.rstrip('/')}/ingest", # Pointing to /ingest
                 json=payload,
                 headers={"X-API-Key": MONITORING_API_KEY}
             )
     except Exception as e:
-        # Silently fail so the proxy doesn't hang if monitor is down
-        pass
+        print("MONITOR ERROR:", e)
 
 # =========================================================
 # [HTTP PROXY MODULE]
