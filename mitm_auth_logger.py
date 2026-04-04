@@ -1,5 +1,5 @@
 
-# mim_auth.py
+# mitm_auth_logger.py
 import json
 import os
 import logging
