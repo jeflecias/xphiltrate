@@ -53,7 +53,6 @@ python xphiltrate.py --target https://login.company.com
 
 ```json
 {
-    "betty-nonprofit-karren.ngrok-free.dev": ["session_id", "sid", "ual"],
     "internal-login.local": ["auth_token"],
     "example.com": ["target"]
 }
