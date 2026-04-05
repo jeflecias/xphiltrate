@@ -57,6 +57,8 @@ python xphiltrate.py --target https://login.company.com
 * **Keys:** Exact domain/hostname (no `https://`)
 * **Values:** List of cookie names or payload keys to prioritize
 
+## Output
+
 ## Browser Setup
 
 Set your browser’s HTTP proxy to:
