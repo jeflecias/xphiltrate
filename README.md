@@ -14,6 +14,11 @@ xPhiltrate demonstrates pre-encryption data capture, session cookie extraction, 
 - JSON logging for captured events
 - Site-specific credential mapping (`site_mapping.json`)
 
+## Demo video 
+[![Watch Demo](https://img.shields.io/badge/Demo-Video-blue?style=for-the-badge&logo=github)](https://github.com/user-attachments/assets/097a8c46-4e06-428d-8640-9b3ce4aed67c)
+
+Here is a walk-through of the MITM setup in a test environment and the expected output. All credentials presented are epheremal.
+
 ## Requirements
 
 - Python 3.12+
@@ -57,8 +62,6 @@ python xphiltrate.py --target https://login.company.com
 * **Keys:** Exact domain/hostname (no `https://`)
 * **Values:** List of cookie names or payload keys to prioritize
 
-## Output
-
 ## Browser Setup
 
 Set your browser’s HTTP proxy to:
@@ -73,6 +76,43 @@ Set your browser’s HTTP proxy to:
 ngrok http 8080
 ```
 
+## Output
+
+The system generates a JSON file named:
+
+```bash
+creds_<timestamp>.json
+````
+
+Each entry represents a captured event during the session. Logs are structured for easy parsing and analysis.
+
+### What to Expect
+
+* Captured form inputs (e.g., username, password)
+* Session cookies (`Set-Cookie`)
+* Fetch/XHR payload data
+* Pre-encryption values (from injected JavaScript)
+
+### Sample Output
+
+```json
+{
+    {
+    "timestamp": "2026-04-05T08:15:09Z",
+    "victim_ip": "<IP of the user>",
+    "event_type": "SET_COOKIE_CAPTURE",
+    "method": "SET-COOKIE",
+    "target_url": "https://<target website>",
+    "captured_credentials": {
+        "session_id": "2ce2cd4501322363ee5ea0ea4e828f560e7720a04cef4faa..."
+    }
+}
+```
+
+## Note
+
+This project serves as a base module for simulated MITM environments. Accuracy depends heavily on proper site mapping and manual reconnaissance, not solely on the python script above. It's recommend to start the manual recon first before using the system
+
 ## Limitations
 
 * JavaScript injection may be blocked by strong CSP policies
@@ -82,11 +122,6 @@ ngrok http 8080
 * Limited to a single target at a time
 * No built-in multi-target or phishlet support
 * Effectiveness depends on target implementation
-
-## Notes
-
-This project serves as a base module for simulated MITM environments. Accuracy depends heavily on proper site mapping and manual reconnaissance, not solely on the predefined script.
-
 
 ## Legal & Ethical Disclaimer
 
